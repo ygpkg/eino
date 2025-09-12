@@ -459,15 +459,15 @@ func NewPlanner(_ context.Context, cfg *PlannerConfig) (adk.Agent, error) {
 	}, nil
 }
 
-// ExecutionContext is the input information for the executor and the planner.
-type ExecutionContext struct {
+// ExecutorContext is the input information for the executor.
+type ExecutorContext struct {
 	UserInput     []adk.Message
 	Plan          Plan
 	ExecutedSteps []ExecutedStep
 }
 
-// GenModelInputFn is a function that generates the input messages for the executor and the planner.
-type GenModelInputFn func(ctx context.Context, in *ExecutionContext) ([]adk.Message, error)
+// GenExecutorModelInputFn is a function that generates the input messages for the executor.
+type GenExecutorModelInputFn func(ctx context.Context, in *ExecutorContext) ([]adk.Message, error)
 
 // ExecutorConfig provides configuration options for creating an executor agent.
 type ExecutorConfig struct {
@@ -484,7 +484,7 @@ type ExecutorConfig struct {
 
 	// GenInputFn generates the input messages for the Executor.
 	// Optional. If not provided, defaultGenExecutorInputFn will be used.
-	GenInputFn GenModelInputFn
+	GenInputFn GenExecutorModelInputFn
 }
 
 type ExecutedStep struct {
@@ -519,7 +519,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 			executedSteps_ = executedStep.([]ExecutedStep)
 		}
 
-		in := &ExecutionContext{
+		in := &ExecutorContext{
 			UserInput:     userInput_,
 			Plan:          plan_,
 			ExecutedSteps: executedSteps_,
@@ -549,7 +549,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 	return agent, nil
 }
 
-func defaultGenExecutorInputFn(ctx context.Context, in *ExecutionContext) ([]adk.Message, error) {
+func defaultGenExecutorInputFn(ctx context.Context, in *ExecutorContext) ([]adk.Message, error) {
 
 	planContent, err := in.Plan.MarshalJSON()
 	if err != nil {
@@ -574,9 +574,19 @@ type replanner struct {
 	planTool    *schema.ToolInfo
 	respondTool *schema.ToolInfo
 
-	genInputFn GenModelInputFn
+	genInputFn GenReplannerModelInputFn
 	newPlan    NewPlan
 }
+
+// ReplannerContext is the input information for the re-planner.
+type ReplannerContext struct {
+	UserInput     []adk.Message
+	Plan          Plan
+	ExecutedSteps []ExecutedStep
+}
+
+// GenReplannerModelInputFn is a function that generates the input messages for the re-planner.
+type GenReplannerModelInputFn func(ctx context.Context, in *ReplannerContext, conf *ReplannerConfig) ([]adk.Message, error)
 
 type ReplannerConfig struct {
 	// ChatModel is the model that supports tool calling capabilities.
@@ -593,7 +603,7 @@ type ReplannerConfig struct {
 
 	// GenInputFn generates the input messages for the Replanner.
 	// Optional. If not provided, buildGenReplannerInputFn will be used.
-	GenInputFn GenModelInputFn
+	GenInputFn GenReplannerModelInputFn
 
 	// NewPlan creates a new Plan instance.
 	// The returned Plan will be used to unmarshal the model-generated JSON output from PlanTool.
@@ -662,16 +672,16 @@ func (r *replanner) genInput(ctx context.Context) ([]adk.Message, error) {
 	}
 	userInput_ := userInput.([]adk.Message)
 
-	in := &ExecutionContext{
+	in := &ExecutorContext{
 		UserInput:     userInput_,
 		Plan:          plan_,
 		ExecutedSteps: executedSteps_,
 	}
 	genInputFn := r.genInputFn
 	if genInputFn == nil {
-		genInputFn = buildGenReplannerInputFn(r.planTool.Name, r.respondTool.Name)
+		genInputFn = DefaultGenReplannerInputFn
 	}
-	msgs, err := genInputFn(ctx, in)
+	msgs, err := genInputFn(ctx, in, r.)
 	if err != nil {
 		return nil, err
 	}
@@ -801,25 +811,38 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 	return iterator
 }
 
-func buildGenReplannerInputFn(planToolName, respondToolName string) GenModelInputFn {
-	return func(ctx context.Context, in *ExecutionContext) ([]adk.Message, error) {
-		planContent, err := in.Plan.MarshalJSON()
-		if err != nil {
-			return nil, err
-		}
-		msgs, err := ReplannerPrompt.Format(ctx, map[string]any{
-			"plan":           string(planContent),
-			"input":          formatInput(in.UserInput),
-			"executed_steps": formatExecutedSteps(in.ExecutedSteps),
-			"plan_tool":      planToolName,
-			"respond_tool":   respondToolName,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		return msgs, nil
+func DefaultGenReplannerInputFn(ctx context.Context, in *ReplannerContext, conf *ReplannerConfig) ([]adk.Message, error) {
+	planContent, err := in.Plan.MarshalJSON()
+	if err != nil {
+		return nil, err
 	}
+
+	planToolName := PlanToolInfo.Name
+	if conf.PlanTool != nil {
+		planToolName = conf.PlanTool.Name
+	}
+
+	respondToolName := RespondToolInfo.Name
+	if conf.RespondTool != nil {
+		respondToolName = conf.RespondTool.Name
+	}
+
+	msgs, err := ReplannerPrompt.Format(ctx, map[string]any{
+		"plan":           string(planContent),
+		"input":          formatInput(in.UserInput),
+		"executed_steps": formatExecutedSteps(in.ExecutedSteps),
+		"plan_tool":      planToolName,
+		"respond_tool":   respondToolName,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return msgs, nil
+}
+
+func buildGenReplannerInputFn(planToolName, respondToolName string) GenExecutorModelInputFn {
+
 }
 
 func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
